@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Movie Recommender</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <h1 class="title">🎬 Movie Recommendation System</h1>
+
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('tab-title')">
+          🔍 Recommend by Title
+        </button>
+        <button class="tab-btn" onclick="switchTab('tab-user')">
+          👤 Recommend by User
+        </button>
+      </div>
+
+      <!-- Tab: Recommend by Title -->
+      <div id="tab-title" class="tab-content active">
+        <div class="search-group">
+          <input
+            type="text"
+            id="movieTitleInput"
+            placeholder="Enter movie title..."
+            list="suggestions"
+          />
+          <datalist id="suggestions"></datalist>
+          <button onclick="fetchByTitle()" class="search-btn">Recommend</button>
+          <button onclick="resetTitle()" class="reset-btn">Reset</button>
+        </div>
+        <div id="loader" class="loader"></div>
+        <div id="titleList" class="card-row"></div>
+      </div>
+
+      <!-- Tab: Recommend by User -->
+      <div id="tab-user" class="tab-content">
+        <div class="search-group">
+          <input
+            type="number"
+            id="userIdInput"
+            placeholder="Enter user ID..."
+          />
+          <button onclick="fetchByUser()" class="search-btn">Recommend</button>
+          <button onclick="resetUser()" class="reset-btn">Reset</button>
+        </div>
+        <div id="loader" class="loader"></div>
+        <canvas
+          id="genreChartUser"
+          width="800"
+          height="500"
+          style="max-width: 100%; margin: 20px auto"
+        ></canvas>
+        <div id="userList" class="card-row"></div>
+      </div>
+    </div>
+
+    <script>
+      function switchTab(tabId) {
+        document
+          .querySelectorAll(".tab-btn")
+          .forEach((btn) => btn.classList.remove("active"));
+        document
+          .querySelectorAll(".tab-content")
+          .forEach((tab) => tab.classList.remove("active"));
+
+        document
+          .querySelector(`[onclick="switchTab('${tabId}')"]`)
+          .classList.add("active");
+        document.getElementById(tabId).classList.add("active");
+      }
+
+      // Tạo card chung cho cả 2 phần fetch
+      function createCard(movie, idx) {
+        const card = document.createElement("div");
+        card.className = "card";
+
+        // Số thứ tự
+        const number = document.createElement("div");
+        number.className = "number";
+        number.innerText = idx + 1;
+
+        // Poster phim
+        const img = document.createElement("img");
+        img.src = movie.poster;
+        img.alt = movie.title;
+        img.className = "movie-poster";
+
+        // Movie ID
+        const movieId = document.createElement("p");
+        movieId.className = "movie-id";
+        movieId.innerText = `🎬 ID: ${movie.id || "N/A"}`;
+
+        // Tên phim
+        const title = document.createElement("p");
+        title.className = "card-title";
+        title.innerText = movie.title;
+
+        // Thể loại phim
+        const genres = document.createElement("p");
+        genres.className = "movie-genres";
+        genres.innerText = `📚 Genres: ${
+          Array.isArray(movie.genres)
+            ? movie.genres.join(", ")
+            : movie.genres || "N/A"
+        }`;
+
+        // Thêm các phần tử vào card
+        card.appendChild(number);
+        card.appendChild(img);
+        card.appendChild(title);
+        card.appendChild(movieId);
+        card.appendChild(genres);
+
+        return card;
+      }
+
+      async function fetchByTitle() {
+        const title = document.getElementById("movieTitleInput").value.trim();
+        if (!title) return;
+
+        const loader = document.getElementById("loader");
+        loader.style.display = "block";
+
+        try {
+          const res = await fetch(
+            `/recommend?title=${encodeURIComponent(title)}`
+          );
+          const data = await res.json();
+          const container = document.getElementById("titleList");
+          container.innerHTML = "";
+
+          if (data.recommendations) {
+            data.recommendations.forEach((movie, idx) => {
+              const card = createCard(movie, idx);
+              container.appendChild(card);
+            });
+          } else {
+            container.innerHTML = `<p class="error">❌ ${data.error}</p>`;
+          }
+        } catch (err) {
+          console.error("Error fetching recommendations:", err);
+        } finally {
+          loader.style.display = "none";
+        }
+      }
+
+      async function fetchByUser() {
+        const userId = document.getElementById("userIdInput").value;
+        if (!userId) return;
+
+        try {
+          const res = await fetch(`/recommend_user?user_id=${userId}`);
+          const data = await res.json();
+          const container = document.getElementById("userList");
+          container.innerHTML = "";
+
+          if (data.recommendations) {
+            data.recommendations.forEach((movie, idx) => {
+              const card = createCard(movie, idx);
+              container.appendChild(card);
+            });
+
+            fetchGenreChart(userId);
+          } else {
+            container.innerHTML = `<p class="error">❌ ${data.error}</p>`;
+          }
+        } catch (err) {
+          console.error("Error fetching user recommendations:", err);
+        }
+      }
+
+      let genreChartUser = null;
+
+      async function fetchGenreChart(userId) {
+        const loader = document.getElementById("loader");
+        loader.style.display = "block";
+
+        try {
+          const res = await fetch(`/user_profile?user_id=${userId}`);
+          const data = await res.json();
+          const genres = data.genre_preferences || {};
+
+          // Sắp xếp genres theo rating trung bình giảm dần
+          const sortedGenres = Object.entries(genres).sort(
+            (a, b) => b[1] - a[1]
+          );
+          const sortedLabels = sortedGenres.map((x) => x[0]);
+          const sortedValues = sortedGenres.map((x) => x[1]);
+
+          const ctx = document
+            .getElementById("genreChartUser")
+            .getContext("2d");
+          if (genreChartUser) genreChartUser.destroy();
+
+          genreChartUser = new Chart(ctx, {
+            type: "bar",
+            data: {
+              labels: sortedLabels,
+              datasets: [
+                {
+                  label: "Điểm trung bình (0 - 5)",
+                  data: sortedValues,
+                  backgroundColor: "rgba(153, 102, 255, 0.6)",
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              plugins: {
+                tooltip: {
+                  callbacks: {
+                    label: function (tooltipItem) {
+                      return tooltipItem.raw + " điểm";
+                    },
+                  },
+                },
+              },
+              scales: {
+                y: {
+                  beginAtZero: true,
+                  max: 5,
+                  ticks: {
+                    stepSize: 1,
+                  },
+                },
+              },
+            },
+          });
+        } catch (err) {
+          console.error("Lỗi khi lấy dữ liệu xu hướng thể loại:", err);
+        } finally {
+          loader.style.display = "none";
+        }
+      }
+
+      function resetTitle() {
+        document.getElementById("movieTitleInput").value = "";
+        document.getElementById("titleList").innerHTML = "";
+      }
+
+      async function loadSuggestions() {
+        const res = await fetch("/titles");
+        const titles = await res.json();
+        const datalist = document.getElementById("suggestions");
+        titles.forEach((t) => {
+          const option = document.createElement("option");
+          option.value = t;
+          datalist.appendChild(option);
+        });
+      }
+
+      window.onload = loadSuggestions;
+
+      function resetUser() {
+        document.getElementById("userIdInput").value = "";
+        document.getElementById("userList").innerHTML = "";
+        if (genreChartUser) genreChartUser.destroy();
+      }
+    </script>
+  </body>
+</html>
