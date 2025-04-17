@@ -1,36 +1,65 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 import os
+import json
 import requests
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from sklearn.metrics.pairwise import cosine_similarity
+import ast
+
+GENRE_MAP = {
+    "0": "Action", "1": "Adventure", "2": "Animation", "3": "Children",
+    "4": "Comedy", "5": "Crime", "6": "Documentary", "7": "Drama",
+    "8": "Fantasy", "9": "Film-Noir", "10": "Horror", "11": "Musical",
+    "12": "Mystery", "13": "Romance", "14": "Sci-Fi", "15": "Thriller",
+    "16": "War", "17": "Western", "18": "IMAX", "19": "Noir"
+}
 
 TMDB_API_KEY = '0527fb6d99e09b2225d6b39f89bd6334'
 app = Flask(__name__)
+app.secret_key = 'None'  
 
 # ----------------------------
-# Load dữ liệu
+# Load data
 # ----------------------------
+def decode_genres(genre_str):
+    ids = str(genre_str).split(',')
+    names = [GENRE_MAP.get(id.strip(), f"ID {id.strip()}") for id in ids]
+    return ', '.join(names)
+
+def genre_score_boost(genre_str):
+    user_fav_genres = {"Comedy", "Animation", "Sci-Fi"}  # 💡 customize later
+    genres = decode_genres(genre_str).split(', ')
+    if not genres:
+        return 1.0
+    boost = 1.0
+    if genres[0] in user_fav_genres:
+        boost += 0.2
+    if any(g in user_fav_genres for g in genres[1:]):
+        boost += 0.1
+    return boost
+
 def load_data():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    movies = pd.read_csv(os.path.join(base_dir, 'ml-1m', 'movies.dat'), sep='::', engine='python',
-                         names=['movieId', 'title', 'genres'], encoding='latin-1')
-    ratings = pd.read_csv(os.path.join(base_dir, 'ml-1m', 'ratings.dat'), sep='::', engine='python',
-                          names=['userId', 'movieId', 'rating', 'timestamp'])
-    return movies, ratings
 
-movies_df, ratings_df = load_data()
+    movies_metadata = pd.read_csv('recsys_export_bundle/movies_metadata.csv')
+    item_factors = pd.read_csv('recsys_export_bundle/item_factors.csv')
 
-# ----------------------------
-# Content-based Filtering
-# ----------------------------
-tfidf = TfidfVectorizer(stop_words='english')
-tfidf_matrix = tfidf.fit_transform(movies_df['genres'])
-cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-indices = pd.Series(movies_df.index, index=movies_df['title'].str.lower())
+    with open('recsys_export_bundle/item2idx.json', 'r') as f:
+        item2idx = json.load(f)
+    with open('recsys_export_bundle/idx2item.json', 'r') as f:
+        idx2item = json.load(f)
+
+    ncf_user_embeddings = np.load('recsys_export_bundle/ncf_user_embeddings.npy')
+    ncf_item_embeddings = np.load('recsys_export_bundle/ncf_item_embeddings.npy')
+
+    return movies_metadata, item_factors, item2idx, idx2item, ncf_user_embeddings, ncf_item_embeddings
+
+movies_metadata, item_factors, item2idx, idx2item, ncf_user_embeddings, ncf_item_embeddings = load_data()
+print("✅ All data loaded successfully")
+
+item_embeddings = np.vstack(item_factors['features'].apply(ast.literal_eval).values)
+item_similarity = cosine_similarity(item_embeddings)
 
 def fetch_poster(title):
     query = title.split('(')[0]
@@ -43,192 +72,133 @@ def fetch_poster(title):
             return f"https://image.tmdb.org/t/p/w500{poster_path}"
     return "https://via.placeholder.com/300x450?text=No+Image"
 
-def get_recommendations(title, top_n=10):
-    title = title.lower()
-    if title not in indices:
-        return []
-
-    idx = indices[title]
-    sim_scores = list(enumerate(cosine_sim[idx]))
-    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
-    sim_scores = sim_scores[1:top_n+1]
-    movie_indices = [i[0] for i in sim_scores]
-
-    results = []
-    for i in movie_indices:
-        try:
-            movie_title = movies_df['title'].iloc[i]
-            if movie_title.lower() == title:
-                continue
-            movie_id = int(movies_df['movieId'].iloc[i])
-            genres_raw = movies_df['genres'].iloc[i]
-            genres = genres_raw.replace('|', ', ') 
-            poster_url = fetch_poster(movie_title)
-            results.append({
-                'title': movie_title,
-                'id': movie_id,
-                'genres': genres,
-                'poster': poster_url
-            })
-        except Exception as e:
-            print(f"❌ Lỗi khi xử lý phim tại index {i}: {e}")
-            continue
-    return results
-
-
-# ----------------------------
-# Mô hình Neural Collaborative Filtering
-# ----------------------------
-class NCF(nn.Module):
-    def __init__(self, num_users, num_items, emb_size=50):
-        super(NCF, self).__init__()
-        self.user_emb = nn.Embedding(num_users, emb_size)
-        self.item_emb = nn.Embedding(num_items, emb_size)
-        self.fc1 = nn.Linear(emb_size * 2, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.output = nn.Linear(64, 1)
-
-    def forward(self, user, item):
-        u = self.user_emb(user)
-        i = self.item_emb(item)
-        x = torch.cat([u, i], dim=-1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.output(x)
-
-# ----------------------------
-# Load mô hình NCF đã huấn luyện
-# ----------------------------
-import joblib
-
-user_encoder = joblib.load('user_encoder.pkl')
-item_encoder = joblib.load('item_encoder.pkl')
-
-n_users = len(user_encoder.classes_)
-n_items = len(item_encoder.classes_)
-
-ncf_model = NCF(n_users, n_items)
-try:
-    state_dict = torch.load('ncf_model.pt', map_location='cpu')
-    ncf_model.load_state_dict(state_dict)
-    ncf_model.eval()
-
-    print("✅ Mô hình NCF đã sẵn sàng")
-except Exception as e:
-    print("❌ Lỗi khi load mô hình NCF:", e)
-
 def get_user_recommendations(user_id, top_n=10):
     try:
-        user_idx = user_encoder.transform([user_id])[0]  # encode user_id
-    except ValueError:
+        user_idx = int(user_id)
+        user_vector = ncf_user_embeddings[user_idx]
+    except Exception as e:
+        print(f"❌ Invalid user: {e}")
         return []
 
-    # Tạo tensor user lặp lại cho tất cả items
-    user_tensor = torch.tensor([user_idx] * n_items)
-    item_tensor = torch.tensor(list(range(n_items)))
+    scores = np.dot(user_vector, ncf_item_embeddings.T)
+    scored_items = list(enumerate(scores))
 
-    with torch.no_grad():
-        scores = ncf_model(user_tensor, item_tensor).squeeze()
+    # Apply genre-based score boost
+    for i, (idx, base_score) in enumerate(scored_items):
+        try:
+            movie_id = int(idx2item[str(idx)])
+            genre_raw = movies_metadata[movies_metadata['movie_id'] == movie_id]['movie_genres'].iloc[0]
+            scored_items[i] = (idx, base_score * genre_score_boost(genre_raw))
+        except:
+            continue
 
-    # Lấy top N item index
-    _, top_indices = torch.topk(scores, top_n)
+    top_indices = [idx for idx, _ in sorted(scored_items, key=lambda x: x[1], reverse=True)[:top_n]]
 
     results = []
     for idx in top_indices:
         try:
-            item_idx = idx.item()
-            movie_id = int(item_encoder.classes_[item_idx])  # lấy movieId gốc từ chỉ số item
-
-            movie_row = movies_df[movies_df['movieId'] == movie_id].iloc[0]
-            title = movie_row['title']
-            genres = movie_row['genres'].replace('|', ', ')
-            poster_url = fetch_poster(title)
-
+            movie_id = int(idx2item[str(idx)])
+            movie = movies_metadata[movies_metadata['movie_id'] == movie_id].iloc[0]
             results.append({
-                'title': title,
+                'title': movie['movie_title'],
                 'id': movie_id,
-                'genres': genres,
-                'poster': poster_url
+                'genres': decode_genres(movie['movie_genres']),
+                'poster': fetch_poster(movie['movie_title'])
             })
         except Exception as e:
-            print(f"❌ Lỗi khi xử lý phim có index {item_idx}: {e}")
+            print(f"❌ Error at idx {idx}: {e}")
             continue
 
     return results
 
-
-from collections import defaultdict
-
-def analyze_user_preferences(user_id):
-    user_ratings = ratings_df[ratings_df['userId'] == user_id]
-    if user_ratings.empty:
-        return {}
-
-    merged = user_ratings.merge(movies_df, on='movieId')
-    genre_scores = defaultdict(list)  # lưu danh sách các rating cho từng thể loại
-
-    # Gán rating cho từng thể loại (không chia đều)
-    for _, row in merged.iterrows():
-        genres = row['genres'].split('|')
-        rating = row['rating']
-        for g in genres:
-            genre_scores[g].append(rating)
-
-    # Tính điểm trung bình mỗi thể loại
-    genre_avg = {
-        genre: round(sum(scores) / len(scores), 2)
-        for genre, scores in genre_scores.items()
-        if scores  # tránh chia cho 0
-    }
-
-    # Sắp xếp theo điểm trung bình giảm dần
-    genre_avg = dict(sorted(genre_avg.items(), key=lambda x: x[1], reverse=True))
-    return genre_avg
-
-# ----------------------------
-# API Routes
-# ----------------------------
-@app.route('/recommend', methods=['GET'])
-def recommend():
-    title = request.args.get('title')
-    if not title:
-        return jsonify({'error': 'Missing "title" parameter'}), 400
-    recommendations = get_recommendations(title)
-    if not recommendations:
-        return jsonify({'error': f'No movie found for title: {title}'}), 404
-    return jsonify({'input': title, 'recommendations': recommendations})
-
-@app.route('/recommend_user', methods=['GET'])
-def recommend_user():
+def get_similar_movies(movie_id, n=10):
     try:
-        user_id = int(request.args.get('user_id'))
-    except:
-        return jsonify({'error': 'Invalid or missing "user_id" parameter'}), 400
-    recommendations = get_user_recommendations(user_id)
-    if not recommendations:
-        return jsonify({'error': f'No recommendations for user_id: {user_id}'}), 404
-    return jsonify({'user_id': user_id, 'recommendations': recommendations})
+        if str(movie_id) not in item2idx:
+            return []
 
-@app.route('/user_profile', methods=['GET'])
-def user_genres():
-    try:
-        user_id = int(request.args.get('user_id'))
-    except:
-        return jsonify({'error': 'Invalid or missing "user_id" parameter'}), 400
+        idx = item2idx[str(movie_id)]
+        sim_scores = item_similarity[idx]
+        similar_indices = sim_scores.argsort()[::-1][1:n+1]
 
-    genre_pref = analyze_user_preferences(user_id)
-    if not genre_pref:
-        return jsonify({'error': f'No genre data for user_id: {user_id}'}), 404
-
-    return jsonify({'user_id': user_id, 'genre_preferences': genre_pref})
-
-@app.route('/titles')
-def titles():
-    return jsonify(movies_df['title'].tolist())
+        results = []
+        for idx in similar_indices:
+            movie_id = idx2item[str(idx)]
+            movie = movies_metadata[movies_metadata['movie_id'] == int(movie_id)].iloc[0]
+            results.append({
+                'title': movie['movie_title'],
+                'id': int(movie_id),
+                'genres': decode_genres(movie['movie_genres']),
+                'poster': fetch_poster(movie['movie_title'])
+            })
+        return results
+    except Exception as e:
+        print(f"Error getting similar movies: {e}")
+        return []
 
 @app.route('/')
 def home():
     return render_template('index_ai.html')
+
+@app.route('/recommend_user')
+def recommend_user():
+    try:
+        user_id = int(request.args.get('user_id'))
+    except:
+        return jsonify({'error': 'Invalid or missing user_id'}), 400
+
+    recommendations = get_user_recommendations(user_id)
+    if not recommendations:
+        return jsonify({'error': 'No recommendations found'}), 404
+    return jsonify({'user_id': user_id, 'recommendations': recommendations})
+
+@app.route('/similar/<int:movie_id>')
+def similar(movie_id):
+    movies = get_similar_movies(movie_id)
+    if not movies:
+        return jsonify({'error': 'No similar movies found'}), 404
+    return jsonify({'movie_id': movie_id, 'recommendations': movies})
+
+@app.route('/search_movies')
+def search_movies():
+    query = request.args.get('query', '').lower()
+    if not query:
+        return jsonify([])
+
+    matching_movies = movies_metadata[
+        movies_metadata['movie_title'].str.lower().str.contains(query)
+    ].head(10)
+
+    results = []
+    for _, movie in matching_movies.iterrows():
+        results.append({
+            'id': int(movie['movie_id']),
+            'title': movie['movie_title'],
+            'genres': decode_genres(movie['movie_genres']),
+            'poster': fetch_poster(movie['movie_title'])
+        })
+    return jsonify(results)
+
+@app.route('/login', methods=['POST'])
+def login():
+    user_id = request.json.get('user_id')
+    try:
+        user_id = int(user_id)
+        if 0 <= user_id < len(ncf_user_embeddings):
+            session['user_id'] = user_id
+            return jsonify({'success': True, 'user_id': user_id})
+        else:
+            return jsonify({'success': False, 'error': 'Invalid user ID'}), 400
+    except:
+        return jsonify({'success': False, 'error': 'Invalid user ID format'}), 400
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    session.pop('user_id', None)
+    return jsonify({'success': True})
+
+@app.route('/get_current_user')
+def get_current_user():
+    return jsonify({'user_id': session.get('user_id')})
 
 if __name__ == '__main__':
     app.run(debug=True)

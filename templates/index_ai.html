@@ -11,80 +11,171 @@
     <div class="container">
       <h1 class="title">🎬 Movie Recommendation System</h1>
 
-      <div class="tabs">
-        <button class="tab-btn active" onclick="switchTab('tab-title')">
-          🔍 Recommend by Title
-        </button>
-        <button class="tab-btn" onclick="switchTab('tab-user')">
-          👤 Recommend by User
-        </button>
+      <!-- Login Section -->
+      <div id="loginSection" class="login-section">
+        <div id="loginForm" style="display: block;">
+          <input type="number" id="loginUserIdInput" placeholder="Enter user ID to login..." />
+          <button onclick="login()" class="login-btn">Login</button>
+        </div>
+        <div id="loggedInInfo" style="display: none;">
+          <span id="userInfo"></span>
+          <button onclick="logout()" class="logout-btn">Logout</button>
+        </div>
       </div>
 
-      <!-- Tab: Recommend by Title -->
-      <div id="tab-title" class="tab-content active">
+      <!-- Main Section -->
+      <div id="mainSection">
+        <h2>NCF Recommendations</h2>
         <div class="search-group">
-          <input
-            type="text"
-            id="movieTitleInput"
-            placeholder="Enter movie title..."
-            list="suggestions"
-          />
-          <datalist id="suggestions"></datalist>
-          <button onclick="fetchByTitle()" class="search-btn">Recommend</button>
-          <button onclick="resetTitle()" class="reset-btn">Reset</button>
+          <div class="search-container">
+            <input
+              type="text"
+              id="movieSearch"
+              placeholder="Search for movies..."
+              autocomplete="off"
+            />
+            <div id="searchResults" class="search-results"></div>
+          </div>
         </div>
         <div id="loader" class="loader"></div>
-        <div id="titleList" class="card-row"></div>
-      </div>
-
-      <!-- Tab: Recommend by User -->
-      <div id="tab-user" class="tab-content">
-        <div class="search-group">
-          <input
-            type="number"
-            id="userIdInput"
-            placeholder="Enter user ID..."
-          />
-          <button onclick="fetchByUser()" class="search-btn">Recommend</button>
-          <button onclick="resetUser()" class="reset-btn">Reset</button>
-        </div>
-        <div id="loader" class="loader"></div>
-        <canvas
-          id="genreChartUser"
-          width="800"
-          height="500"
-          style="max-width: 100%; margin: 20px auto"
-        ></canvas>
         <div id="userList" class="card-row"></div>
+      </div>
+
+      <!-- Similar Movies Section -->
+      <div id="similarSection" style="display: none;">
+        <h2>Similar Movies (ALS)</h2>
+        <div id="similarList" class="card-row"></div>
+        <button onclick="showMainSection()" class="back-btn">Back to NCF Recommendations</button>
       </div>
     </div>
 
     <script>
-      function switchTab(tabId) {
-        document
-          .querySelectorAll(".tab-btn")
-          .forEach((btn) => btn.classList.remove("active"));
-        document
-          .querySelectorAll(".tab-content")
-          .forEach((tab) => tab.classList.remove("active"));
-
-        document
-          .querySelector(`[onclick="switchTab('${tabId}')"]`)
-          .classList.add("active");
-        document.getElementById(tabId).classList.add("active");
+      // Login functionality
+      async function checkLoginStatus() {
+        try {
+          const res = await fetch('/get_current_user');
+          const data = await res.json();
+          if (data.user_id !== null) {
+            showLoggedInState(data.user_id);
+          } else {
+            showLoggedOutState();
+          }
+        } catch (err) {
+          console.error('Error checking login status:', err);
+        }
       }
 
-      // Tạo card chung cho cả 2 phần fetch
-      function createCard(movie, idx) {
+      function showLoggedInState(userId) {
+        document.getElementById('loginForm').style.display = 'none';
+        document.getElementById('loggedInInfo').style.display = 'block';
+        document.getElementById('userInfo').textContent = `Logged in as User ${userId}`;
+        document.getElementById('mainSection').style.display = 'block';
+      }
+
+      function showLoggedOutState() {
+        document.getElementById('loginForm').style.display = 'block';
+        document.getElementById('loggedInInfo').style.display = 'none';
+        document.getElementById('mainSection').style.display = 'none';
+        document.getElementById('userList').innerHTML = '';
+      }
+
+      async function login() {
+        const userId = document.getElementById('loginUserIdInput').value;
+        if (!userId) return;
+
+        try {
+          const res = await fetch('/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId })
+          });
+          const data = await res.json();
+          
+          if (data.success) {
+            showLoggedInState(userId);
+            fetchByUser(userId);
+          } else {
+            alert(data.error || 'Login failed');
+          }
+        } catch (err) {
+          console.error('Error during login:', err);
+          alert('Login failed');
+        }
+      }
+
+      async function logout() {
+        try {
+          await fetch('/logout', { method: 'POST' });
+          showLoggedOutState();
+        } catch (err) {
+          console.error('Error during logout:', err);
+        }
+      }
+
+      // Movie search functionality
+      let searchTimeout;
+      const movieSearch = document.getElementById('movieSearch');
+      const searchResults = document.getElementById('searchResults');
+
+      movieSearch.addEventListener('input', function(e) {
+        clearTimeout(searchTimeout);
+        const query = e.target.value;
+        
+        if (query.length < 2) {
+          searchResults.innerHTML = '';
+          return;
+        }
+
+        searchTimeout = setTimeout(() => searchMovies(query), 300);
+      });
+
+      async function searchMovies(query) {
+        try {
+          const res = await fetch(`/search_movies?query=${encodeURIComponent(query)}`);
+          const movies = await res.json();
+          
+          searchResults.innerHTML = '';
+          movies.forEach(movie => {
+            const div = document.createElement('div');
+            div.className = 'search-result-item';
+            div.innerHTML = `
+              <img src="${movie.poster}" alt="${movie.title}" class="search-result-poster">
+              <div class="search-result-info">
+                <div class="search-result-title">${movie.title}</div>
+                <div class="search-result-genres">${movie.genres}</div>
+              </div>
+            `;
+            div.onclick = () => {
+              movieSearch.value = '';
+              searchResults.innerHTML = '';
+              fetchSimilarMovies(movie.id);
+            };
+            searchResults.appendChild(div);
+          });
+        } catch (err) {
+          console.error('Error searching movies:', err);
+        }
+      }
+
+      document.addEventListener('click', function(e) {
+        if (!searchResults.contains(e.target) && e.target !== movieSearch) {
+          searchResults.innerHTML = '';
+        }
+      });
+      // Create card for movies
+      function createCard(movie, idx, showSimilar = true) {
         const card = document.createElement("div");
         card.className = "card";
+        if (showSimilar) {
+          card.onclick = () => fetchSimilarMovies(movie.id, movie.title);
+        }
 
-        // Số thứ tự
+        // Number
         const number = document.createElement("div");
         number.className = "number";
         number.innerText = idx + 1;
 
-        // Poster phim
+        // Poster
         const img = document.createElement("img");
         img.src = movie.poster;
         img.alt = movie.title;
@@ -95,12 +186,12 @@
         movieId.className = "movie-id";
         movieId.innerText = `🎬 ID: ${movie.id || "N/A"}`;
 
-        // Tên phim
+        // Title
         const title = document.createElement("p");
         title.className = "card-title";
         title.innerText = movie.title;
 
-        // Thể loại phim
+        // Genres
         const genres = document.createElement("p");
         genres.className = "movie-genres";
         genres.innerText = `📚 Genres: ${
@@ -109,7 +200,7 @@
             : movie.genres || "N/A"
         }`;
 
-        // Thêm các phần tử vào card
+        // Add elements to card
         card.appendChild(number);
         card.appendChild(img);
         card.appendChild(title);
@@ -119,19 +210,17 @@
         return card;
       }
 
-      async function fetchByTitle() {
-        const title = document.getElementById("movieTitleInput").value.trim();
-        if (!title) return;
+      async function fetchByUser(userId) {
+        if (!userId) return;
+        if (!userId) return;
 
         const loader = document.getElementById("loader");
         loader.style.display = "block";
 
         try {
-          const res = await fetch(
-            `/recommend?title=${encodeURIComponent(title)}`
-          );
+          const res = await fetch(`/recommend_user?user_id=${userId}`);
           const data = await res.json();
-          const container = document.getElementById("titleList");
+          const container = document.getElementById("userList");
           container.innerHTML = "";
 
           if (data.recommendations) {
@@ -149,117 +238,47 @@
         }
       }
 
-      async function fetchByUser() {
-        const userId = document.getElementById("userIdInput").value;
-        if (!userId) return;
-
-        try {
-          const res = await fetch(`/recommend_user?user_id=${userId}`);
-          const data = await res.json();
-          const container = document.getElementById("userList");
-          container.innerHTML = "";
-
-          if (data.recommendations) {
-            data.recommendations.forEach((movie, idx) => {
-              const card = createCard(movie, idx);
-              container.appendChild(card);
-            });
-
-            fetchGenreChart(userId);
-          } else {
-            container.innerHTML = `<p class="error">❌ ${data.error}</p>`;
-          }
-        } catch (err) {
-          console.error("Error fetching user recommendations:", err);
-        }
-      }
-
-      let genreChartUser = null;
-
-      async function fetchGenreChart(userId) {
+      async function fetchSimilarMovies(movieId, movieTitle) {
         const loader = document.getElementById("loader");
         loader.style.display = "block";
 
         try {
-          const res = await fetch(`/user_profile?user_id=${userId}`);
+          const res = await fetch(`/similar/${movieId}`);
           const data = await res.json();
-          const genres = data.genre_preferences || {};
+          const container = document.getElementById("similarList");
+          container.innerHTML = "";
 
-          // Sắp xếp genres theo rating trung bình giảm dần
-          const sortedGenres = Object.entries(genres).sort(
-            (a, b) => b[1] - a[1]
-          );
-          const sortedLabels = sortedGenres.map((x) => x[0]);
-          const sortedValues = sortedGenres.map((x) => x[1]);
+          if (data.recommendations) {
+            // Update section title with movie name
+            document.querySelector('#similarSection h2').innerText =
+              movieTitle ? `Similar Movies to "${movieTitle}"` : 'Similar Movies';
+            
+            data.recommendations.forEach((movie, idx) => {
+              const card = createCard(movie, idx, true); // Allow clicking for continuous exploration
+              container.appendChild(card);
+            });
 
-          const ctx = document
-            .getElementById("genreChartUser")
-            .getContext("2d");
-          if (genreChartUser) genreChartUser.destroy();
-
-          genreChartUser = new Chart(ctx, {
-            type: "bar",
-            data: {
-              labels: sortedLabels,
-              datasets: [
-                {
-                  label: "Điểm trung bình (0 - 5)",
-                  data: sortedValues,
-                  backgroundColor: "rgba(153, 102, 255, 0.6)",
-                },
-              ],
-            },
-            options: {
-              responsive: true,
-              plugins: {
-                tooltip: {
-                  callbacks: {
-                    label: function (tooltipItem) {
-                      return tooltipItem.raw + " điểm";
-                    },
-                  },
-                },
-              },
-              scales: {
-                y: {
-                  beginAtZero: true,
-                  max: 5,
-                  ticks: {
-                    stepSize: 1,
-                  },
-                },
-              },
-            },
-          });
+            // Show similar section
+            document.getElementById("mainSection").style.display = "none";
+            document.getElementById("similarSection").style.display = "block";
+          } else {
+            container.innerHTML = `<p class="error">❌ ${data.error}</p>`;
+          }
         } catch (err) {
-          console.error("Lỗi khi lấy dữ liệu xu hướng thể loại:", err);
+          console.error("Error fetching similar movies:", err);
         } finally {
           loader.style.display = "none";
         }
       }
 
-      function resetTitle() {
-        document.getElementById("movieTitleInput").value = "";
-        document.getElementById("titleList").innerHTML = "";
+      function showMainSection() {
+        document.getElementById("similarSection").style.display = "none";
+        document.getElementById("mainSection").style.display = "block";
       }
-
-      async function loadSuggestions() {
-        const res = await fetch("/titles");
-        const titles = await res.json();
-        const datalist = document.getElementById("suggestions");
-        titles.forEach((t) => {
-          const option = document.createElement("option");
-          option.value = t;
-          datalist.appendChild(option);
-        });
-      }
-
-      window.onload = loadSuggestions;
 
       function resetUser() {
         document.getElementById("userIdInput").value = "";
         document.getElementById("userList").innerHTML = "";
-        if (genreChartUser) genreChartUser.destroy();
       }
     </script>
   </body>
